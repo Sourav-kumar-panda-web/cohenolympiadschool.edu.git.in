@@ -3,7 +3,7 @@ const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
-const path = require("path");
+const path = require('path');
 const app = express();
 const PORT = 3000;
 
@@ -16,7 +16,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use(session({
   secret: 'your_secret_key',
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, maxAge: 3600000 } // secure and expiring in 1 hour
 }));
 app.use(express.static(path.join(__dirname, 'views')));
 app.use('/css', express.static(path.join(__dirname, 'assets', 'css')));
@@ -34,18 +35,10 @@ db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS students (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      email TEXT UNIQUE,
-      username TEXT,
-      password TEXT,
-      address TEXT,
-      phone TEXT UNIQUE,
-      school TEXT,
-      class TEXT,
-      division TEXT,
-      percentage REAL,
-      subjects TEXT,
-      hobbies TEXT,
+      name TEXT, email TEXT UNIQUE, username TEXT,
+      password TEXT, address TEXT, phone TEXT UNIQUE,
+      school TEXT, class TEXT, division TEXT,
+      percentage REAL, subjects TEXT, hobbies TEXT,
       parent_phone TEXT UNIQUE,
       math_progress INTEGER DEFAULT 0,
       science_progress INTEGER DEFAULT 0,
@@ -72,7 +65,7 @@ db.serialize(() => {
   `);
 });
 
-// ---------- DEFAULT ADMIN CREATION ----------
+// ---------- DEFAULT ADMIN ----------
 const defaultAdminEmail = "admin@school.com";
 const defaultAdminPassword = "admin123";
 
@@ -82,10 +75,10 @@ bcrypt.hash(defaultAdminPassword, 10, (err, hash) => {
   }
 });
 
-// ---------- AUTH MIDDLEWARE ----------
+// ---------- MIDDLEWARE: AUTH ----------
 function adminAuthMiddleware(req, res, next) {
   if (req.session && req.session.adminId) return next();
-  res.status(401).json({ error: 'Unauthorized' });
+  res.status(401).json({ error: 'Unauthorized admin' });
 }
 
 function studentAuthMiddleware(req, res, next) {
@@ -93,22 +86,12 @@ function studentAuthMiddleware(req, res, next) {
   res.status(401).json({ error: 'Unauthorized student' });
 }
 
-// ---------- PAGE ROUTES ----------
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "views", "index.html"));
-});
-
-app.get("/login", (req, res) => {
-  res.sendFile(path.join(__dirname, "views", "login.html"));
-});
-
-app.get("/register", (req, res) => {
-  res.sendFile(path.join(__dirname, "views", "register.html"));
-});
-
-app.get('/admin-login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin-portal', 'adminLogin.html'));
-});
+// ---------- STATIC ROUTES ----------
+app.get("/", (req, res) => res.redirect("/login"));
+app.get("/login", (req, res) => res.sendFile(path.join(__dirname, "views", "login.html")));
+app.get("/register", (req, res) => res.sendFile(path.join(__dirname, "views", "register.html")));
+app.get("/admin-login", (req, res) => res.sendFile(path.join(__dirname, "admin-portal", "adminLogin.html")));
+app.get("/index.html", studentAuthMiddleware, (req, res) => res.sendFile(path.join(__dirname, "views", "index.html")));
 
 // ---------- STUDENT REGISTRATION ----------
 app.post('/register-student', async (req, res) => {
@@ -130,14 +113,13 @@ app.post('/register-student', async (req, res) => {
         name, email, username, password, address, phone,
         school, class, division, percentage, subjects,
         hobbies, parent_phone, math_progress, science_progress, english_progress
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run([
       name, email, username, hashedPassword, address, phone,
       school, studentClass, division, percentage, subjects,
-      hobbies, parent_phone, progress_math, progress_science, progress_english
+      hobbies, parent_phone, progress_math || 0, progress_science || 0, progress_english || 0
     ], function (err) {
       if (err) {
         console.error("Registration error:", err.message);
@@ -154,42 +136,32 @@ app.post('/register-student', async (req, res) => {
 // ---------- STUDENT LOGIN ----------
 app.post('/login-student', (req, res) => {
   const { username, password } = req.body;
+  db.get('SELECT * FROM students WHERE username = ?', [username], async (err, user) => {
+    if (err) return res.status(500).json({ success: false, message: 'Database error' });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-  db.get('SELECT * FROM students WHERE username = ?', [username], (err, user) => {
-    if (err) {
-      console.error(err);
-      return res.json({ success: false, message: 'Internal error' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (isMatch) {
+      req.session.studentId = user.id;
+      req.session.userType = "student";
+      res.json({ success: true, message: 'Login successful' });
+    } else {
+      res.status(401).json({ success: false, message: 'Incorrect password' });
     }
-    if (!user) {
-      return res.json({ success: false, message: 'User not found' });
-    }
-
-    // If using bcrypt:
-    bcrypt.compare(password, user.password, (err, result) => {
-      if (result) {
-        req.session.userId = user.id;
-        return res.json({ success: true });
-      } else {
-        return res.json({ success: false, message: 'Invalid credentials' });
-      }
-    });
-
-    // If plain text (not recommended):
-    // if (password === user.password) {
-    //   req.session.userId = user.id;
-    //   return res.json({ success: true });
-    // } else {
-    //   return res.json({ success: false, message: 'Invalid credentials' });
-    // }
   });
 });
 
-
-// ---------- STUDENT DASHBOARD ----------
-app.get("/index.html", studentAuthMiddleware, (req, res) => {
-  res.sendFile(path.join(__dirname, "views", "index.html"));
+app.get('/check-login', (req, res) => {
+  if (req.session.userType === 'student') {
+    res.json({ loggedIn: true, type: 'student' });
+  } else if (req.session.userType === 'admin') {
+    res.json({ loggedIn: true, type: 'admin' });
+  } else {
+    res.json({ loggedIn: false });
+  }
 });
 
+// ---------- STUDENT DASHBOARD ----------
 app.get('/student-dashboard-data', studentAuthMiddleware, (req, res) => {
   db.get('SELECT * FROM students WHERE id = ?', [req.session.studentId], (err, student) => {
     if (err || !student) return res.json({ success: false });
@@ -202,28 +174,28 @@ app.get('/student-dashboard-data', studentAuthMiddleware, (req, res) => {
         student,
         assignments,
         progress: {
-          math: student.math_progress || 0,
-          science: student.science_progress || 0,
-          english: student.english_progress || 0
+          math: student.math_progress,
+          science: student.science_progress,
+          english: student.english_progress
         },
-        examScores: [60, 70, 80]
+        examScores: [60, 70, 80] // demo scores
       });
     });
   });
 });
 
-// ---------- PROGRESS UPDATE ----------
+// ---------- UPDATE STUDENT PROGRESS ----------
 app.post('/update-progress', studentAuthMiddleware, (req, res) => {
   const { math, science, english } = req.body;
 
-  db.run(
-    `UPDATE students SET math_progress = ?, science_progress = ?, english_progress = ? WHERE id = ?`,
-    [math, science, english, req.session.studentId],
-    (err) => {
-      if (err) return res.json({ success: false, message: 'Database error' });
-      res.json({ success: true, message: 'Progress updated' });
-    }
-  );
+  db.run(`
+    UPDATE students
+    SET math_progress = ?, science_progress = ?, english_progress = ?
+    WHERE id = ?
+  `, [math, science, english, req.session.studentId], (err) => {
+    if (err) return res.json({ success: false, message: 'DB error' });
+    res.json({ success: true, message: 'Progress updated' });
+  });
 });
 
 // ---------- ADMIN LOGIN ----------
@@ -236,6 +208,7 @@ app.post('/admin-login', (req, res) => {
     bcrypt.compare(password, admin.password, (err, result) => {
       if (result) {
         req.session.adminId = admin.id;
+        req.session.userType = "admin";
         res.json({ success: true });
       } else {
         res.status(401).json({ success: false, message: 'Invalid credentials' });
@@ -244,14 +217,7 @@ app.post('/admin-login', (req, res) => {
   });
 });
 
-// ---------- ADMIN DASHBOARD ----------
-app.get('/admin-users', adminAuthMiddleware, (req, res) => {
-  db.all(`SELECT id, name, school, phone FROM students`, [], (err, rows) => {
-    if (err) return res.status(500).send('Error loading users');
-    res.json(rows);
-  });
-});
-
+// ---------- ADMIN ROUTES ----------
 app.get('/admin-dashboard-data', adminAuthMiddleware, (req, res) => {
   db.all('SELECT id, name, school, phone FROM students', (err, rows) => {
     if (err) return res.status(500).json({ error: 'Failed to load students' });
@@ -259,7 +225,14 @@ app.get('/admin-dashboard-data', adminAuthMiddleware, (req, res) => {
   });
 });
 
-// ---------- ASSIGNMENT ROUTES ----------
+app.get('/admin-users', adminAuthMiddleware, (req, res) => {
+  db.all(`SELECT id, name, school, phone FROM students`, [], (err, rows) => {
+    if (err) return res.status(500).send('Error loading users');
+    res.json(rows);
+  });
+});
+
+// ---------- ASSIGNMENTS ----------
 app.post('/assign-task', adminAuthMiddleware, (req, res) => {
   const { student_phone, title } = req.body;
   db.run(`INSERT INTO assignments (student_phone, title) VALUES (?, ?)`, [student_phone, title], (err) => {
@@ -278,7 +251,7 @@ app.get('/all-assignments', adminAuthMiddleware, (req, res) => {
 app.post('/edit-assignment', adminAuthMiddleware, (req, res) => {
   const { id, title } = req.body;
   db.run(`UPDATE assignments SET title = ? WHERE id = ?`, [title, id], (err) => {
-    if (err) return res.json({ success: false, message: 'Error updating' });
+    if (err) return res.json({ success: false, message: 'Update error' });
     res.json({ success: true, message: 'Updated successfully' });
   });
 });
@@ -286,26 +259,25 @@ app.post('/edit-assignment', adminAuthMiddleware, (req, res) => {
 app.post('/delete-assignment', adminAuthMiddleware, (req, res) => {
   const { id } = req.body;
   db.run(`DELETE FROM assignments WHERE id = ?`, [id], (err) => {
-    if (err) return res.json({ success: false, message: 'Error deleting' });
+    if (err) return res.json({ success: false, message: 'Delete error' });
     res.json({ success: true, message: 'Deleted successfully' });
   });
 });
 
-// ---------- DELETE STUDENT ----------
+// ---------- STUDENT DETAILS & DELETE ----------
+app.get('/student-details/:id', adminAuthMiddleware, (req, res) => {
+  const studentId = req.params.id;
+  db.get('SELECT * FROM students WHERE id = ?', [studentId], (err, row) => {
+    if (err) return res.status(500).json({ error: 'Fetch error' });
+    res.json(row);
+  });
+});
+
 app.delete('/admin/users/:id', adminAuthMiddleware, (req, res) => {
   const { id } = req.params;
   db.run('DELETE FROM students WHERE id = ?', [id], function (err) {
     if (err) return res.status(500).json({ error: 'Delete Error' });
     res.json({ success: true });
-  });
-});
-
-// ---------- STUDENT DETAIL ----------
-app.get('/student-details/:id', (req, res) => {
-  const studentId = req.params.id;
-  db.get('SELECT * FROM students WHERE id = ?', [studentId], (err, row) => {
-    if (err) return res.status(500).json({ error: 'Failed to get details' });
-    res.json(row);
   });
 });
 
@@ -318,8 +290,9 @@ app.post('/logout', (req, res) => {
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
 
 
 
